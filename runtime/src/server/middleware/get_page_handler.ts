@@ -47,7 +47,7 @@ export function get_page_handler(
 		 } = get_build_info();
 
 		res.setHeader('Content-Type', 'text/html');
-		res.setHeader('Cache-Control', dev ? 'no-cache' : 'max-age=600');
+		res.setHeader('Cache-Control', 'no-cache');
 
 		// preload main.js and current route
 		// TODO detect other stuff we can preload? images, CSS, fonts?

@@ -146,7 +146,7 @@ describe('basics', function() {
 
 		assert.equal(
 			headers['cache-control'],
-			'max-age=600'
+			'no-cache'
 		);
 
 		// TODO preload more than just the entry point
