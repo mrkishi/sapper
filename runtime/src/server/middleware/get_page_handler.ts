@@ -171,6 +171,13 @@ export function get_page_handler(
 
 			preloaded = await Promise.all(toPreload);
 		} catch (err) {
+			if (error) {
+				// early bail for preload error
+				res.statusCode = 500;
+				res.end(`<pre>${escape_html(err.message)}</pre>`);
+				return;
+			}
+
 			preload_error = { statusCode: 500, message: err };
 			preloaded = []; // appease TypeScript
 		}
