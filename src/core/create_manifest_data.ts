@@ -25,6 +25,19 @@ export default function create_manifest_data(cwd: string): ManifestData {
 		return false;
 	}
 
+	function find_layout(file_name: string, component_name: string, dir: string = '') {
+		const ext = component_extensions.find((ext) => fs.existsSync(path.join(cwd, dir, `${file_name}${ext}`)));
+		const file = posixify(path.join(dir, `${file_name}${ext}`))
+
+		return ext
+			? {
+				name: component_name,
+				file: file,
+				has_preload: has_preload(file)
+			}
+			: null;
+	}
+
 	const components: PageComponent[] = [];
 	const pages: Page[] = [];
 	const server_routes: ServerRoute[] = [];
@@ -61,15 +74,19 @@ export default function create_manifest_data(cwd: string): ManifestData {
 				const is_dir = fs.statSync(resolved).isDirectory();
 
 				const ext = path.extname(basename);
+
+				if (basename[0] === '_') return null;
+				if (basename[0] === '.' && basename !== '.well-known') return null;
 				if (!is_dir && !/^\.[a-z]+$/i.test(ext)) return null; // filter out tmp files etc
 
 				const segment = is_dir
 					? basename
-					: basename.slice(0, -path.extname(basename).length);
+					: basename.slice(0, -ext.length);
 
 				const parts = get_parts(segment);
 				const is_index = is_dir ? false : basename.startsWith('index.');
 				const is_page = component_extensions.indexOf(ext) !== -1;
+				const route_suffix = basename.slice(basename.indexOf('.'), -ext.length);
 
 				parts.forEach(part => {
 					if (/\]\[/.test(part.content)) {
@@ -88,39 +105,35 @@ export default function create_manifest_data(cwd: string): ManifestData {
 					file: posixify(file),
 					is_dir,
 					is_index,
-					is_page
+					is_page,
+					route_suffix
 				};
 			})
 			.filter(Boolean)
 			.sort(comparator);
 
 		items.forEach(item => {
-			if (item.basename[0] === '_') return;
-
-			if (item.basename[0] === '.') {
-				if (item.file !== '.well-known') return;
-			}
-
 			const segments = parent_segments.slice();
 
-			if (item.is_index && segments.length > 0) {
-				const last_segment = segments[segments.length - 1].slice();
-				const suffix = item.basename
-					.slice(0, -path.extname(item.basename).length).
-					replace('index', '');
+			if (item.is_index) {
+				if (item.route_suffix) {
+					if (segments.length > 0) {
+						const last_segment = segments[segments.length - 1].slice();
+						const last_part = last_segment[last_segment.length - 1];
 
-				if (suffix) {
-					const last_part = last_segment[last_segment.length - 1];
-					if (last_part.dynamic) {
-						last_segment.push({ dynamic: false, content: suffix });
+						if (last_part.dynamic) {
+							last_segment.push({ dynamic: false, content: item.route_suffix });
+						} else {
+							last_segment[last_segment.length - 1] = {
+								dynamic: false,
+								content: `${last_part.content}${item.route_suffix}`
+							};
+						}
+
+						segments[segments.length - 1] = last_segment;
 					} else {
-						last_segment[last_segment.length - 1] = {
-							dynamic: false,
-							content: `${last_part.content}${suffix}`
-						};
+						segments.push(item.parts);
 					}
-
-					segments[segments.length - 1] = last_segment;
 				}
 			} else {
 				segments.push(item.parts);
@@ -130,16 +143,7 @@ export default function create_manifest_data(cwd: string): ManifestData {
 			params.push(...item.parts.filter(p => p.dynamic).map(p => p.content));
 
 			if (item.is_dir) {
-				const ext = component_extensions.find((ext: string) => {
-					const index = path.join(dir, item.basename, `_layout${ext}`);
-					return fs.existsSync(index);
-				});
-
-				const component = ext && {
-					name: `${get_slug(item.file)}__layout`,
-					file: `${item.file}/_layout${ext}`,
-					has_preload: has_preload(`${item.file}/_layout${ext}`)
-				};
+				const component = find_layout('_layout', `${get_slug(item.file)}__layout`, item.file);
 
 				if (component) components.push(component);
 
@@ -154,8 +158,6 @@ export default function create_manifest_data(cwd: string): ManifestData {
 			}
 
 			else if (item.is_page) {
-				const is_index = item.basename === `index${item.ext}`;
-
 				const component = {
 					name: get_slug(item.file),
 					file: item.file,
@@ -164,22 +166,20 @@ export default function create_manifest_data(cwd: string): ManifestData {
 
 				components.push(component);
 
-				const parts = (is_index && stack[stack.length - 1] === null)
+				const parts = (item.is_index && stack[stack.length - 1] === null)
 					? stack.slice(0, -1).concat({ component, params })
 					: stack.concat({ component, params })
 
-				const page = {
-					pattern: get_pattern(is_index ? parent_segments : segments, true),
+				pages.push({
+					pattern: get_pattern(segments, true),
 					parts
-				};
-
-				pages.push(page);
+				});
 			}
 
 			else {
 				server_routes.push({
 					name: `route_${get_slug(item.file)}`,
-					pattern: get_pattern(segments, false),
+					pattern: get_pattern(segments, !item.route_suffix),
 					file: item.file,
 					params: params
 				});
@@ -187,23 +187,8 @@ export default function create_manifest_data(cwd: string): ManifestData {
 		});
 	}
 
-	const root_ext = component_extensions.find(ext => fs.existsSync(path.join(cwd, `_layout${ext}`)));
-	const root = root_ext
-		? {
-			name: 'main',
-			file: `_layout${root_ext}`,
-			has_preload: has_preload(`_layout${root_ext}`)
-		}
-		: default_layout;
-
-	const error_ext = component_extensions.find(ext => fs.existsSync(path.join(cwd, `_error${ext}`)));
-	const error = error_ext
-		? {
-			name: 'error',
-			file: `_error${error_ext}`,
-			has_preload: has_preload(`_error${error_ext}`)
-		}
-		: default_error;
+	const root = find_layout('_layout', 'main') || default_layout;
+	const error = find_layout('_error', 'error') || default_error;
 
 	walk(cwd, [], [], []);
 
@@ -249,7 +234,7 @@ type Part = {
 	spread?: boolean;
 };
 
-function is_spead(path: string) {
+function is_spread(path: string) {
 	const spread_pattern = /\[\.{3}/g;
 	return spread_pattern.test(path)
 }
@@ -259,9 +244,9 @@ function comparator(
 	b: { basename: string, parts: Part[], file: string, is_index: boolean }
 ) {
 	if (a.is_index !== b.is_index) {
-		if (a.is_index) return is_spead(a.file) ? 1 : -1;
+		if (a.is_index) return is_spread(a.file) ? 1 : -1;
 
-		return is_spead(b.file) ? -1 : 1;
+		return is_spread(b.file) ? -1 : 1;
 	}
 
 	const max = Math.max(a.parts.length, b.parts.length);
@@ -334,7 +319,6 @@ function get_parts(part: string): Part[] {
 function get_slug(file: string) {
 	let name = file
 		.replace(/[\\\/]index/, '')
-		.replace(/_default([\/\\index])?\.html$/, 'index')
 		.replace(/[\/\\]/g, '_')
 		.replace(/\.\w+$/, '')
 		.replace(/\[([^(]+)(?:\([^(]+\))?\]/, '$$$1')
@@ -347,19 +331,19 @@ function get_slug(file: string) {
 }
 
 function get_pattern(segments: Part[][], add_trailing_slash: boolean) {
-	return new RegExp(
-		`^` +
-		segments.map(segment => {
-			return '\\/' + segment.map(part => {
-				return part.dynamic
-					? part.qualifier || part.spread ? '(.+)' : '([^\\/]+?)'
-					: encodeURI(part.content.normalize())
-						.replace(/\?/g, '%3F')
-						.replace(/#/g, '%23')
-						.replace(/%5B/g, '[')
-						.replace(/%5D/g, ']');
-			}).join('');
-		}).join('') +
-		(add_trailing_slash ? '\\\/?$' : '$')
-	);
+	const path = segments.map(segment => {
+		return segment.map(part => {
+			return part.dynamic
+				? part.qualifier || part.spread ? '(.+)' : '([^\\/]+?)'
+				: encodeURI(part.content.normalize())
+					.replace(/\?/g, '%3F')
+					.replace(/#/g, '%23')
+					.replace(/%5B/g, '[')
+					.replace(/%5D/g, ']');
+		}).join('');
+	}).join('\\/');
+
+	const trailing = add_trailing_slash && segments.length ? '\\/?$' : '$';
+
+	return new RegExp(`^\\/${path}${trailing}`);
 }
